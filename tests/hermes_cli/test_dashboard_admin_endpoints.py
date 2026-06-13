@@ -139,6 +139,35 @@ class TestCredentialPoolEndpoints:
         )
         assert r.status_code == 400
 
+    def test_bare_custom_provider_rejected_without_base_url(self):
+        """Bare `custom` has no registry inference_base_url. Writing such an
+        entry with `base_url=""` produces the poison row that hijacks bare
+        `provider: custom` resolution and surfaces as
+        `Provider resolver returned an empty base URL` downstream. Refuse
+        rather than persist it. Regression for the 2026-06-13 root-cause."""
+        r = self.client.post(
+            "/api/credentials/pool",
+            json={"provider": "custom", "api_key": "whatever"},
+        )
+        assert r.status_code == 400
+        assert "custom_providers" in r.json()["detail"]
+
+    def test_alias_provider_inherits_canonical_base_url(self):
+        """`google` is an alias for `gemini`; the entry must inherit
+        gemini's inference_base_url so it is not written with an empty
+        base_url (same poison shape as bare `custom`)."""
+        r = self.client.post(
+            "/api/credentials/pool",
+            json={"provider": "google", "api_key": "AQ.test-key"},
+        )
+        assert r.status_code == 200
+
+        from agent.credential_pool import load_pool
+
+        raw = load_pool("google").entries()
+        assert raw[0].base_url, "base_url must not be empty for alias providers"
+        assert "googleapis.com" in raw[0].base_url
+
 
 class TestMemoryEndpoints:
     @pytest.fixture(autouse=True)

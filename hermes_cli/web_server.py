@@ -7645,6 +7645,35 @@ async def add_credential_pool_entry(body: CredentialPoolAdd):
     if not provider or not api_key:
         raise HTTPException(status_code=400, detail="provider and api_key are required")
 
+    # Resolve the canonical provider for base_url lookup so aliases (e.g.
+    # "google" → "gemini") inherit the registry's inference_base_url instead
+    # of being written with an empty base_url. The empty-base_url shape
+    # ("source": "manual", "base_url": "") is exactly the poison pool entry
+    # that hijacks bare `provider: custom` resolution and surfaces as
+    # "Provider resolver returned an empty base URL" downstream.
+    from hermes_cli.auth import resolve_provider as _resolve_provider
+    from hermes_cli.auth_commands import _provider_base_url
+
+    try:
+        canonical = _resolve_provider(provider)
+    except Exception:
+        canonical = provider
+    base_url = _provider_base_url(canonical)
+    if not base_url:
+        # No known inference endpoint for this provider id. Bare "custom"
+        # and unknown aliases fall here — they need a `custom:<name>` form
+        # backed by a custom_providers entry. Refuse rather than write a
+        # poison row that will brick `hermes chat` later.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot add credential for provider '{provider}': no inference base_url "
+                "is registered. For local/self-hosted endpoints, add a `custom_providers` "
+                "entry to config.yaml first and then attach the credential to "
+                "`custom:<name>`."
+            ),
+        )
+
     try:
         pool = load_pool(provider)
         label = (body.label or "").strip() or f"key #{len(pool.entries()) + 1}"
@@ -7656,8 +7685,11 @@ async def add_credential_pool_entry(body: CredentialPoolAdd):
             priority=0,
             source=SOURCE_MANUAL,
             access_token=api_key,
+            base_url=base_url,
         )
         pool.add_entry(entry)
+    except HTTPException:
+        raise
     except Exception as exc:
         _log.exception("POST /api/credentials/pool failed")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
