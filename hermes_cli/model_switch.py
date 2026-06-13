@@ -1823,6 +1823,17 @@ def list_authenticated_providers(
                     "api_key": api_key,
                     "models": [],
                     "discover_models": discover,
+                    # Narrowing-intent signal. True when EITHER an entry
+                    # contributed an explicit ``models:`` list, OR multiple
+                    # entries collectively pin a subset via singular
+                    # ``model:`` (the Ollama Cloud "four entries, one model
+                    # each" pattern). False for the lone-entry-singular-
+                    # ``model:`` case, which is what ``hermes setup`` writes
+                    # by default for a freshly added custom endpoint and
+                    # which must still trigger live discovery — otherwise
+                    # llama-swap users see only the single default model.
+                    "_user_curated_models": False,
+                    "_entry_count": 0,
                 }
             else:
                 if api_key and not groups[group_key].get("api_key"):
@@ -1837,6 +1848,13 @@ def list_authenticated_providers(
             # stores every configured model as a dict under ``models:``;
             # downstream readers (agent/models_dev.py, gateway/run.py,
             # run_agent.py, hermes_cli/config.py) already consume that dict.
+            groups[group_key]["_entry_count"] += 1
+            # Two or more entries collectively narrowing the endpoint counts
+            # as user-curated intent (e.g. four Ollama Cloud rows pinning
+            # four specific cloud-served models).
+            if groups[group_key]["_entry_count"] > 1:
+                groups[group_key]["_user_curated_models"] = True
+
             default_model = (entry.get("model") or "").strip()
             if default_model and default_model not in groups[group_key]["models"]:
                 groups[group_key]["models"].append(default_model)
@@ -1846,10 +1864,14 @@ def list_authenticated_providers(
                 for m in cfg_models:
                     if m and m not in groups[group_key]["models"]:
                         groups[group_key]["models"].append(m)
+                if cfg_models:
+                    groups[group_key]["_user_curated_models"] = True
             elif isinstance(cfg_models, list):
                 for m in cfg_models:
                     if m and m not in groups[group_key]["models"]:
                         groups[group_key]["models"].append(m)
+                if cfg_models:
+                    groups[group_key]["_user_curated_models"] = True
 
         _section4_emitted_slugs: set = set()
         _current_base_url_norm = str(current_base_url or "").strip().rstrip("/").lower()
@@ -1924,9 +1946,19 @@ def list_authenticated_providers(
             #   api_key is present. This supports endpoints that expose a
             #   full aggregator catalog via /models but only serve a subset
             #   (parity with section 3's user ``providers:`` behaviour).
+            # Probe live /models when:
+            #   - api_key is set (the Bifrost/aggregator opt-in), OR
+            #   - the group does not look user-curated (see flag docs above).
+            # A lone entry with a singular ``model:`` (the default ``hermes
+            # setup`` writes for a freshly added custom endpoint) is NOT
+            # narrowing intent; without this distinction llama-swap users see
+            # only the single default model instead of the full dynamic
+            # catalogue. The ollama.com narrowing cases (users explicitly
+            # listing a subset via ``models:`` OR via multiple singular
+            # entries) are preserved by the flag.
             should_probe = (
                 bool(api_url)
-                and (bool(api_key) or not grp["models"])
+                and (bool(api_key) or not grp.get("_user_curated_models"))
                 and grp.get("discover_models", True)
             )
             if should_probe:
